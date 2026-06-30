@@ -1,0 +1,132 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EventStatus {
+  ACTIVE
+  CANCELLED
+  COMPLETED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  telegramId   BigInt   @unique
+  username     String?
+  firstName    String
+  lastName     String?
+  languageCode String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  profile            Profile?
+  groupMemberships   GroupMember[]
+  createdEvents      Event[]            @relation("EventCreator")
+  eventParticipations EventParticipant[]
+
+  @@index([username])
+  @@index([isActive])
+}
+
+model Profile {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  name         String
+  field        String
+  age          Int?
+  company      String?
+  hobbies      String?
+  technologies String?
+  description  String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  deletedAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([name])
+  @@index([isActive])
+}
+
+model Group {
+  id         String   @id @default(cuid())
+  telegramId BigInt   @unique
+  title      String
+  username   String?
+  type       String
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  members GroupMember[]
+  events  Event[]
+
+  @@index([isActive])
+}
+
+model GroupMember {
+  id             String    @id @default(cuid())
+  groupId        String
+  userId         String
+  profileVisible Boolean   @default(false)
+  isActive       Boolean   @default(true)
+  joinedAt       DateTime  @default(now())
+  leftAt         DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([groupId, userId])
+  @@index([groupId, isActive, profileVisible])
+  @@index([userId, isActive])
+}
+
+model Event {
+  id                    String      @id @default(cuid())
+  groupId               String
+  creatorId             String
+  title                 String
+  startsAt              DateTime
+  location              String
+  description           String?
+  status                EventStatus @default(ACTIVE)
+  telegramMessageId     BigInt?
+  reminderTwoHoursSent  Boolean     @default(false)
+  reminderThirtyMinSent Boolean     @default(false)
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+
+  group        Group              @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  creator      User               @relation("EventCreator", fields: [creatorId], references: [id], onDelete: Restrict)
+  participants EventParticipant[]
+
+  @@index([groupId, status, startsAt])
+  @@index([status, startsAt, reminderTwoHoursSent])
+  @@index([status, startsAt, reminderThirtyMinSent])
+}
+
+model EventParticipant {
+  id        String    @id @default(cuid())
+  eventId   String
+  userId    String
+  isActive  Boolean   @default(true)
+  joinedAt  DateTime  @default(now())
+  leftAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([eventId, userId])
+  @@index([eventId, isActive])
+  @@index([userId, isActive])
+}
