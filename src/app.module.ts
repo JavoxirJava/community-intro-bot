@@ -8,6 +8,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { ProfilesModule } from './profiles/profiles.module';
 import { SearchModule } from './search/search.module';
 import { UsersModule } from './users/users.module';
+import { VacanciesModule } from './vacancies/vacancies.module';
 
 @Module({
   imports: [
@@ -18,6 +19,11 @@ import { UsersModule } from './users/users.module';
         if (!config.BOT_TOKEN) throw new Error('BOT_TOKEN is required');
         if (!config.DATABASE_URL) throw new Error('DATABASE_URL is required');
         config.APP_TIMEZONE ??= 'Asia/Tashkent';
+        const domain = String(config.WEBHOOK_DOMAIN ?? '').trim();
+        const secret = String(config.WEBHOOK_SECRET ?? '').trim();
+        if (domain && secret.length < 16) {
+          throw new Error('WEBHOOK_DOMAIN bilan WEBHOOK_SECRET (kamida 16 belgi) shart');
+        }
         return config;
       },
     }),
@@ -28,6 +34,7 @@ import { UsersModule } from './users/users.module';
     GroupsModule,
     SearchModule,
     EventsModule,
+    VacanciesModule,
     BotModule,
   ],
 })

@@ -13,6 +13,13 @@ enum EventStatus {
   COMPLETED
 }
 
+enum VacancyStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  ARCHIVED
+}
+
 model User {
   id           String   @id @default(cuid())
   telegramId   BigInt   @unique
@@ -28,6 +35,8 @@ model User {
   groupMemberships   GroupMember[]
   createdEvents      Event[]            @relation("EventCreator")
   eventParticipations EventParticipant[]
+  createdVacancies   Vacancy[]          @relation("VacancyCreator")
+  approvedVacancies  Vacancy[]          @relation("VacancyApprover")
 
   @@index([username])
   @@index([isActive])
@@ -66,6 +75,7 @@ model Group {
 
   members GroupMember[]
   events  Event[]
+  vacancies Vacancy[]
 
   @@index([isActive])
 }
@@ -100,7 +110,9 @@ model Event {
   status                EventStatus @default(ACTIVE)
   telegramMessageId     BigInt?
   reminderTwoHoursSent  Boolean     @default(false)
+  reminderOneHourSent   Boolean     @default(false)
   reminderThirtyMinSent Boolean     @default(false)
+  reminderStartedSent   Boolean     @default(false)
   createdAt             DateTime    @default(now())
   updatedAt             DateTime    @updatedAt
 
@@ -110,7 +122,9 @@ model Event {
 
   @@index([groupId, status, startsAt])
   @@index([status, startsAt, reminderTwoHoursSent])
+  @@index([status, startsAt, reminderOneHourSent])
   @@index([status, startsAt, reminderThirtyMinSent])
+  @@index([status, startsAt, reminderStartedSent])
 }
 
 model EventParticipant {
@@ -129,4 +143,32 @@ model EventParticipant {
   @@unique([eventId, userId])
   @@index([eventId, isActive])
   @@index([userId, isActive])
+}
+
+model Vacancy {
+  id           String        @id @default(cuid())
+  groupId      String
+  creatorId    String
+  title        String
+  company      String
+  workFormat   String
+  location     String
+  salary       String?
+  requirements String
+  contact      String
+  description  String?
+  status       VacancyStatus @default(PENDING)
+  approvedById String?
+  approvedAt   DateTime?
+  rejectedAt   DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  group      Group @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  creator    User  @relation("VacancyCreator", fields: [creatorId], references: [id], onDelete: Restrict)
+  approvedBy User? @relation("VacancyApprover", fields: [approvedById], references: [id], onDelete: Restrict)
+
+  @@index([groupId, status, createdAt])
+  @@index([creatorId, status, createdAt])
+  @@index([status, createdAt])
 }

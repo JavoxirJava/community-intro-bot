@@ -1,0 +1,28 @@
+[Unit]
+Description=Community Intro Telegram bot
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=community
+Group=community
+WorkingDirectory=/srv/community/app
+EnvironmentFile=/etc/community/runtime.env
+Environment=NODE_OPTIONS=--max-old-space-size=160
+ExecStart=/opt/node/bin/node dist/main.js
+Restart=on-failure
+RestartSec=5
+UMask=0027
+LimitNOFILE=65536
+MemoryMax=256M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/srv/community/app /srv/community/shared/logs
+StandardOutput=append:/srv/community/shared/logs/bot.log
+StandardError=append:/srv/community/shared/logs/bot.err
+
+[Install]
+WantedBy=multi-user.target

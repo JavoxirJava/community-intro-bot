@@ -73,4 +73,21 @@ export class ProfilesService {
     }
     return lines.join('\n');
   }
+
+  formatInput(profile: ProfileInput): string {
+    const lines = [
+      `<b>Ism:</b> ${escapeHtml(profile.name)}`,
+      `<b>Soha:</b> ${escapeHtml(profile.field)}`,
+    ];
+    if (profile.age) lines.push(`<b>Yosh:</b> ${profile.age}`);
+    if (profile.company) lines.push(`<b>Kompaniya:</b> ${escapeHtml(profile.company)}`);
+    if (profile.technologies) {
+      lines.push(`<b>Texnologiyalar:</b> ${escapeHtml(profile.technologies)}`);
+    }
+    if (profile.hobbies) lines.push(`<b>Hobby:</b> ${escapeHtml(profile.hobbies)}`);
+    if (profile.description) {
+      lines.push(`<b>Description:</b> ${escapeHtml(profile.description)}`);
+    }
+    return lines.join('\n');
+  }
 }

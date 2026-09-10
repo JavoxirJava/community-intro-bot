@@ -1,0 +1,76 @@
+# Native VPS deploy (no Docker). Webhook is proxied on existing TLS host.
+name: Deploy VPS
+
+permissions:
+  contents: read
+
+concurrency:
+  group: community-vps
+  cancel-in-progress: false
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: Prisma generate
+        env:
+          DATABASE_URL: postgresql://community_app@127.0.0.1:5432/community_db
+        run: npx prisma generate
+      - run: npm run build
+      - name: Pack
+        run: |
+          mkdir -p staging
+          rsync -a dist/ staging/dist/
+          rsync -a prisma/ staging/prisma/
+          cp package.json package-lock.json staging/
+          test -f staging/dist/main.js
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: community-app
+          path: staging/
+          include-hidden-files: true
+          if-no-files-found: error
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/master' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: community-app
+          path: staging
+      - name: Rsync app and ops
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          HOST: ${{ secrets.VPS_HOST }}
+          USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" && test -n "$HOST" && test -n "$USER"
+          install -d -m 700 ~/.ssh
+          umask 077
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519,rsa "$HOST" >> ~/.ssh/known_hosts
+          test -f staging/dist/main.js
+          export RSYNC_RSH='ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes'
+          rsync -az --delete staging/ "$USER@$HOST:/srv/community/incoming/app/"
+          rsync -az ops/vps/ "$USER@$HOST:/srv/community/incoming/ops/vps/"
+          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes \
+            "$USER@$HOST" 'sudo /usr/local/sbin/community-apply-release bot'

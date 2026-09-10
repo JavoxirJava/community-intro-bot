@@ -1,37 +1,20 @@
 name: community-intro-bot
 
-services:
-  postgres:
-    image: postgres:16-alpine
-    restart: always
-    environment:
-      POSTGRES_DB: community_intro_bot
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      TZ: Asia/Tashkent
-    ports:
-      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d community_intro_bot"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+# 2026-08-11: 'postgres' servisi olib tashlandi — baza hostdagi PostgreSQL 18 ga
+# ko'chirildi. Egalik 'postgres' superuser'idan alohida 'community_bot' roliga
+# o'tkazildi (app endi superuser bilan ulanmaydi).
+# Ulanish satri .env dagi DATABASE_URL dan olinadi — yagona manba.
 
+services:
   bot:
     build:
       context: .
       dockerfile: Dockerfile
     restart: always
+    network_mode: host
     environment:
       BOT_TOKEN: ${BOT_TOKEN:-}
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/community_intro_bot?schema=public
+      BOT_OWNER_IDS: ${BOT_OWNER_IDS:-}
+      DATABASE_URL: ${DATABASE_URL:?.env faylida DATABASE_URL bo'lishi shart}
       APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Tashkent}
       TZ: Asia/Tashkent
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-volumes:
-  postgres_data:

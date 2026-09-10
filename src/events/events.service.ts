@@ -23,6 +23,7 @@ const eventInclude = {
 } satisfies Prisma.EventInclude;
 
 export type EventWithParticipants = Prisma.EventGetPayload<{ include: typeof eventInclude }>;
+export type ReminderKind = 'twoHours' | 'oneHour' | 'thirtyMinutes' | 'started';
 
 @Injectable()
 export class EventsService {
@@ -153,44 +154,79 @@ export class EventsService {
       .join('\n');
   }
 
-  async dueForReminder(kind: 'twoHours' | 'thirtyMinutes'): Promise<EventWithParticipants[]> {
+  async dueForReminder(kind: ReminderKind): Promise<EventWithParticipants[]> {
     const now = new Date();
-    const upper = DateTime.fromJSDate(now)
-      .plus({ minutes: kind === 'twoHours' ? 120 : 30 })
-      .toJSDate();
-    const lower =
-      kind === 'twoHours' ? DateTime.fromJSDate(now).plus({ minutes: 30 }).toJSDate() : now;
+    const window =
+      kind === 'twoHours'
+        ? { lowerMinutes: 60, upperMinutes: 120 }
+        : kind === 'oneHour'
+          ? { lowerMinutes: 30, upperMinutes: 60 }
+          : kind === 'thirtyMinutes'
+            ? { lowerMinutes: 0, upperMinutes: 30 }
+            : { lowerMinutes: -10, upperMinutes: 0 };
+    const lower = DateTime.fromJSDate(now).plus({ minutes: window.lowerMinutes }).toJSDate();
+    const upper = DateTime.fromJSDate(now).plus({ minutes: window.upperMinutes }).toJSDate();
+    const pendingFilter =
+      kind === 'twoHours'
+        ? { reminderTwoHoursSent: false }
+        : kind === 'oneHour'
+          ? { reminderOneHourSent: false }
+          : kind === 'thirtyMinutes'
+            ? { reminderThirtyMinSent: false }
+            : { reminderStartedSent: false };
+
     return this.prisma.event.findMany({
       where: {
         status: EventStatus.ACTIVE,
         group: { isActive: true },
         startsAt: { gt: lower, lte: upper },
-        ...(kind === 'twoHours'
-          ? { reminderTwoHoursSent: false }
-          : { reminderThirtyMinSent: false }),
+        ...pendingFilter,
       },
       include: eventInclude,
     });
   }
 
-  async claimReminder(eventId: string, kind: 'twoHours' | 'thirtyMinutes'): Promise<boolean> {
+  async claimReminder(eventId: string, kind: ReminderKind): Promise<boolean> {
+    const pendingFilter =
+      kind === 'twoHours'
+        ? { reminderTwoHoursSent: false }
+        : kind === 'oneHour'
+          ? { reminderOneHourSent: false }
+          : kind === 'thirtyMinutes'
+            ? { reminderThirtyMinSent: false }
+            : { reminderStartedSent: false };
+    const sentUpdate =
+      kind === 'twoHours'
+        ? { reminderTwoHoursSent: true }
+        : kind === 'oneHour'
+          ? { reminderOneHourSent: true }
+          : kind === 'thirtyMinutes'
+            ? { reminderThirtyMinSent: true }
+            : { reminderStartedSent: true };
+
     const result = await this.prisma.event.updateMany({
       where: {
         id: eventId,
-        ...(kind === 'twoHours'
-          ? { reminderTwoHoursSent: false }
-          : { reminderThirtyMinSent: false }),
+        ...pendingFilter,
       },
-      data: kind === 'twoHours' ? { reminderTwoHoursSent: true } : { reminderThirtyMinSent: true },
+      data: sentUpdate,
     });
     return result.count === 1;
   }
 
-  async releaseReminder(eventId: string, kind: 'twoHours' | 'thirtyMinutes'): Promise<void> {
+  async releaseReminder(eventId: string, kind: ReminderKind): Promise<void> {
+    const pendingUpdate =
+      kind === 'twoHours'
+        ? { reminderTwoHoursSent: false }
+        : kind === 'oneHour'
+          ? { reminderOneHourSent: false }
+          : kind === 'thirtyMinutes'
+            ? { reminderThirtyMinSent: false }
+            : { reminderStartedSent: false };
+
     await this.prisma.event.update({
       where: { id: eventId },
-      data:
-        kind === 'twoHours' ? { reminderTwoHoursSent: false } : { reminderThirtyMinSent: false },
+      data: pendingUpdate,
     });
   }
 

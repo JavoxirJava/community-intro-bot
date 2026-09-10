@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Profile } from '@prisma/client';
 import { EventInput } from '../events/events.service';
 import { ProfileInput } from '../common/utils/profile-parser';
+import { VacancyInput } from '../vacancies/vacancies.service';
 
 type ProfileKey = keyof ProfileInput;
 
@@ -18,6 +19,20 @@ interface EventFlow {
   creatorId: string;
   step: number;
   data: Partial<EventInput>;
+  expiresAt: number;
+}
+
+interface VacancyFlow {
+  groupId: string;
+  creatorId: string;
+  step: number;
+  data: Partial<VacancyInput>;
+  expiresAt: number;
+}
+
+interface IntroDraft {
+  telegramUserId: number;
+  data: ProfileInput;
   expiresAt: number;
 }
 
@@ -48,12 +63,44 @@ const EVENT_STEPS: Array<{ key: keyof EventInput; prompt: string }> = [
   { key: 'description', prompt: 'Tadbir tavsifini kiriting (- yuborsangiz, bo‘sh qoladi):' },
 ];
 
+const VACANCY_STEPS: Array<{
+  key: keyof VacancyInput;
+  prompt: string;
+  maxLength: number;
+  optional?: boolean;
+}> = [
+  { key: 'title', prompt: 'Lavozim nomini kiriting:', maxLength: 120 },
+  { key: 'company', prompt: 'Kompaniya nomini kiriting:', maxLength: 120 },
+  {
+    key: 'workFormat',
+    prompt: 'Ish formatini kiriting (ofis, remote, hybrid, full-time va hokazo):',
+    maxLength: 80,
+  },
+  { key: 'location', prompt: 'Joylashuvni kiriting:', maxLength: 150 },
+  {
+    key: 'salary',
+    prompt: 'Maosh yoki vilkani kiriting (- yuborsangiz, ko‘rsatilmaydi):',
+    maxLength: 120,
+    optional: true,
+  },
+  { key: 'requirements', prompt: 'Asosiy talablarni kiriting:', maxLength: 1000 },
+  { key: 'contact', prompt: 'Bog‘lanish uchun kontaktni kiriting:', maxLength: 250 },
+  {
+    key: 'description',
+    prompt: 'Qo‘shimcha tavsifni kiriting (- yuborsangiz, bo‘sh qoladi):',
+    maxLength: 1000,
+    optional: true,
+  },
+];
+
 const FLOW_TTL_MS = 30 * 60 * 1000;
 
 @Injectable()
 export class BotFlowService {
   private readonly profileFlows = new Map<number, ProfileFlow>();
   private readonly eventFlows = new Map<string, EventFlow>();
+  private readonly vacancyFlows = new Map<string, VacancyFlow>();
+  private readonly introDrafts = new Map<string, IntroDraft>();
 
   startProfile(
     telegramUserId: number,
@@ -121,7 +168,9 @@ export class BotFlowService {
   }
 
   startEvent(chatId: number, telegramUserId: number, groupId: string, creatorId: string): string {
-    this.eventFlows.set(this.eventKey(chatId, telegramUserId), {
+    const key = this.chatUserKey(chatId, telegramUserId);
+    this.vacancyFlows.delete(key);
+    this.eventFlows.set(key, {
       groupId,
       creatorId,
       step: 0,
@@ -136,7 +185,7 @@ export class BotFlowService {
     telegramUserId: number,
     text: string,
   ): FlowResult<{ groupId: string; creatorId: string; data: EventInput }> {
-    const key = this.eventKey(chatId, telegramUserId);
+    const key = this.chatUserKey(chatId, telegramUserId);
     const flow = this.eventFlows.get(key);
     if (!flow) return { handled: false };
     if (flow.expiresAt < Date.now()) {
@@ -176,8 +225,105 @@ export class BotFlowService {
     };
   }
 
+  startVacancy(chatId: number, telegramUserId: number, groupId: string, creatorId: string): string {
+    const key = this.chatUserKey(chatId, telegramUserId);
+    this.eventFlows.delete(key);
+    this.vacancyFlows.set(key, {
+      groupId,
+      creatorId,
+      step: 0,
+      data: {},
+      expiresAt: Date.now() + FLOW_TTL_MS,
+    });
+    return VACANCY_STEPS[0].prompt;
+  }
+
+  consumeVacancy(
+    chatId: number,
+    telegramUserId: number,
+    text: string,
+  ): FlowResult<{ groupId: string; creatorId: string; data: VacancyInput }> {
+    const key = this.chatUserKey(chatId, telegramUserId);
+    const flow = this.vacancyFlows.get(key);
+    if (!flow) return { handled: false };
+    if (flow.expiresAt < Date.now()) {
+      this.vacancyFlows.delete(key);
+      return {
+        handled: true,
+        prompt: 'Vacansiya qo‘shish vaqti tugadi. /vacancy bilan qayta boshlang.',
+      };
+    }
+
+    const step = VACANCY_STEPS[flow.step];
+    const value = text.trim();
+    if (!value) {
+      return { handled: true, prompt: `Qiymat bo‘sh bo‘lmasligi kerak.\n\n${step.prompt}` };
+    }
+    if (!step.optional && value === '-') {
+      return { handled: true, prompt: `Bu maydon majburiy.\n\n${step.prompt}` };
+    }
+    if (value.length > step.maxLength) {
+      return {
+        handled: true,
+        prompt: `Qiymat ${step.maxLength} belgidan oshmasligi kerak.\n\n${step.prompt}`,
+      };
+    }
+
+    if (step.key === 'salary' || step.key === 'description') {
+      flow.data[step.key] = value === '-' ? null : value;
+    } else {
+      flow.data[step.key] = value;
+    }
+    flow.step += 1;
+    flow.expiresAt = Date.now() + FLOW_TTL_MS;
+
+    if (flow.step < VACANCY_STEPS.length) {
+      return { handled: true, prompt: VACANCY_STEPS[flow.step].prompt };
+    }
+    this.vacancyFlows.delete(key);
+    return {
+      handled: true,
+      completed: {
+        groupId: flow.groupId,
+        creatorId: flow.creatorId,
+        data: flow.data as VacancyInput,
+      },
+    };
+  }
+
   cancelProfile(telegramUserId: number): void {
     this.profileFlows.delete(telegramUserId);
+  }
+
+  cancel(telegramUserId: number, chatId?: number): void {
+    this.profileFlows.delete(telegramUserId);
+    if (chatId !== undefined) {
+      const key = this.chatUserKey(chatId, telegramUserId);
+      this.eventFlows.delete(key);
+      this.vacancyFlows.delete(key);
+    }
+  }
+
+  saveIntroDraft(memberId: string, telegramUserId: number, data: ProfileInput): void {
+    this.introDrafts.set(memberId, {
+      telegramUserId,
+      data,
+      expiresAt: Date.now() + FLOW_TTL_MS,
+    });
+  }
+
+  getIntroDraft(memberId: string, telegramUserId: number): ProfileInput | null {
+    const draft = this.introDrafts.get(memberId);
+    if (!draft || draft.telegramUserId !== telegramUserId) return null;
+    if (draft.expiresAt < Date.now()) {
+      this.introDrafts.delete(memberId);
+      return null;
+    }
+    return draft.data;
+  }
+
+  deleteIntroDraft(memberId: string): void {
+    this.introDrafts.delete(memberId);
   }
 
   private profilePrompt(flow: ProfileFlow): string {
@@ -224,7 +370,7 @@ export class BotFlowService {
     return null;
   }
 
-  private eventKey(chatId: number, telegramUserId: number): string {
+  private chatUserKey(chatId: number, telegramUserId: number): string {
     return `${chatId}:${telegramUserId}`;
   }
 }

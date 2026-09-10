@@ -1,15 +1,21 @@
 import { BadRequestException, Logger } from '@nestjs/common';
+import { VacancyStatus } from '@prisma/client';
 import { Action, Command, Ctx, On, Start, Update } from 'nestjs-telegraf';
 import { Context, Markup } from 'telegraf';
 import { Chat, Message } from 'telegraf/types';
 import { PROFILE_EXAMPLE } from '../common/constants/bot-commands';
-import { parseProfileMessage } from '../common/utils/profile-parser';
+import {
+  hasProfileRequiredKey,
+  parseFreeformProfileMessage,
+  parseProfileMessage,
+} from '../common/utils/profile-parser';
 import { escapeHtml, telegramMention } from '../common/utils/telegram-mention.util';
 import { EventsService } from '../events/events.service';
 import { GroupsService } from '../groups/groups.service';
 import { ProfilesService } from '../profiles/profiles.service';
 import { SearchResult, SearchService } from '../search/search.service';
 import { UsersService } from '../users/users.service';
+import { VacanciesService } from '../vacancies/vacancies.service';
 import { BotFlowService } from './bot-flow.service';
 
 type GroupChat = Chat.GroupChat | Chat.SupergroupChat;
@@ -24,6 +30,7 @@ export class BotUpdate {
     private readonly groups: GroupsService,
     private readonly search: SearchService,
     private readonly events: EventsService,
+    private readonly vacancies: VacanciesService,
     private readonly flows: BotFlowService,
   ) {}
 
@@ -38,6 +45,7 @@ export class BotUpdate {
         'Profil yaratish: /profile',
         'Profilni ko‘rish: /myprofile',
         'Qidirish: /search Ali',
+        'Vacansiyalarni ko‘rish: /vacancies',
       ].join('\n'),
     );
   }
@@ -83,7 +91,7 @@ export class BotUpdate {
   @Command('cancel')
   async cancel(@Ctx() ctx: Context): Promise<void> {
     if (!ctx.from) return;
-    this.flows.cancelProfile(ctx.from.id);
+    this.flows.cancel(ctx.from.id, this.isGroup(ctx) ? ctx.chat.id : undefined);
     await ctx.reply('Amal bekor qilindi.');
   }
 
@@ -200,6 +208,26 @@ export class BotUpdate {
       membership.userId,
     );
     await ctx.reply(`${prompt}\n\nJarayonni to‘xtatish uchun 30 daqiqa kuting.`);
+  }
+
+  @Command('vacancy')
+  async vacancy(@Ctx() ctx: Context): Promise<void> {
+    await this.startVacancySubmission(ctx);
+  }
+
+  @Command('vakansiya')
+  async vakansiya(@Ctx() ctx: Context): Promise<void> {
+    await this.startVacancySubmission(ctx);
+  }
+
+  @Command('vacancies')
+  async vacanciesCommand(@Ctx() ctx: Context): Promise<void> {
+    await this.showVacancyGroups(ctx);
+  }
+
+  @Command('vakansiyalar')
+  async vakansiyalarCommand(@Ctx() ctx: Context): Promise<void> {
+    await this.showVacancyGroups(ctx);
   }
 
   @On('new_chat_members')
@@ -324,6 +352,109 @@ export class BotUpdate {
     }
   }
 
+  @Action(/^vacapp:([ar]):(.+)$/)
+  async vacancyApproval(@Ctx() ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+    const match = this.actionMatch(ctx);
+    if (!this.vacancies.isOwner(ctx.from.id)) {
+      await ctx.answerCbQuery('Bu amal faqat bot egasi uchun.', { show_alert: true });
+      return;
+    }
+
+    const owner = await this.users.upsertTelegramUser(ctx.from);
+    const result =
+      match[1] === 'a'
+        ? await this.vacancies.approve(match[2], owner.id)
+        : await this.vacancies.reject(match[2]);
+    const vacancy = result.vacancy;
+    if (!vacancy) {
+      await ctx.answerCbQuery('Vacansiya topilmadi.', { show_alert: true });
+      return;
+    }
+
+    const expectedStatus = match[1] === 'a' ? VacancyStatus.APPROVED : VacancyStatus.REJECTED;
+    if (!result.changed || vacancy.status !== expectedStatus) {
+      await ctx.answerCbQuery('Bu vacansiya allaqachon ko‘rib chiqilgan.', { show_alert: true });
+      return;
+    }
+
+    const approved = match[1] === 'a';
+    await ctx.answerCbQuery(approved ? 'Vacansiya tasdiqlandi.' : 'Vacansiya rad etildi.');
+    await this.safeEditMessageText(
+      ctx,
+      `${approved ? '✅ Tasdiqlandi' : '❌ Rad etildi'}\n\n${this.vacancies.format(vacancy)}`,
+    );
+
+    try {
+      await ctx.telegram.sendMessage(
+        vacancy.creator.telegramId.toString(),
+        approved
+          ? `Vacansiyangiz tasdiqlandi va ${escapeHtml(vacancy.group.title)} guruh a’zolari uchun ko‘rinadi.\n\n${this.vacancies.format(vacancy, 'list')}`
+          : `Vacansiyangiz rad etildi.\n\n${this.vacancies.format(vacancy, 'list')}`,
+        { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
+      );
+    } catch (error) {
+      this.logger.warn(`Could not notify vacancy creator: ${String(error)}`);
+    }
+  }
+
+  @Action(/^vacg:([^:]+):(\d+)$/)
+  async vacancyPage(@Ctx() ctx: Context): Promise<void> {
+    if (!ctx.from || !this.isPrivate(ctx)) return;
+    const requester = await this.users.upsertTelegramUser(ctx.from);
+    const match = this.actionMatch(ctx);
+    const groupId = match[1];
+    const page = Number(match[2]);
+    const membership = await this.vacancies.findAccessibleGroup(requester.id, groupId);
+    if (!membership) {
+      await ctx.answerCbQuery(
+        'Bu guruh vacansiyalarini ko‘rish uchun guruh a’zosi bo‘lishingiz kerak.',
+        {
+          show_alert: true,
+        },
+      );
+      return;
+    }
+
+    await ctx.answerCbQuery();
+    await this.replyVacancyPage(ctx, requester.id, groupId, page, true);
+  }
+
+  @Action(/^intro:([yn]):(.+)$/)
+  async introConfirmation(@Ctx() ctx: Context): Promise<void> {
+    if (!ctx.from || !this.isGroup(ctx)) return;
+    const match = this.actionMatch(ctx);
+    const membership = await this.groups.findMembershipForVisibility(match[2]);
+    const draft = this.flows.getIntroDraft(match[2], ctx.from.id);
+    if (
+      !membership ||
+      !membership.isActive ||
+      membership.user.telegramId !== BigInt(ctx.from.id) ||
+      membership.group.telegramId !== BigInt(ctx.chat.id) ||
+      !draft
+    ) {
+      await ctx.answerCbQuery('Tasdiqlash muddati tugagan yoki bu amal sizga tegishli emas.', {
+        show_alert: true,
+      });
+      return;
+    }
+
+    this.flows.deleteIntroDraft(membership.id);
+    if (match[1] === 'n') {
+      await ctx.answerCbQuery('Profil saqlanmadi.');
+      await ctx.editMessageText('Tanishtirish profili saqlanmadi.');
+      return;
+    }
+
+    const profile = await this.profiles.save(membership.userId, draft);
+    await this.groups.setVisibility(membership.id, true);
+    await ctx.answerCbQuery('Profil saqlandi.');
+    await ctx.editMessageText(
+      `${telegramMention(membership.user)}\n\n${this.profiles.format(profile)}`,
+      { parse_mode: 'HTML' },
+    );
+  }
+
   @On('text')
   async text(@Ctx() ctx: Context): Promise<void> {
     if (!ctx.from || !ctx.message || !('text' in ctx.message)) return;
@@ -337,6 +468,16 @@ export class BotUpdate {
           await ctx.reply(eventFlow.prompt);
         } else {
           await this.completeEvent(ctx, eventFlow.completed);
+        }
+        return;
+      }
+
+      const vacancyFlow = this.flows.consumeVacancy(ctx.chat.id, ctx.from.id, text);
+      if (vacancyFlow.handled) {
+        if ('prompt' in vacancyFlow) {
+          await ctx.reply(vacancyFlow.prompt);
+        } else {
+          await this.completeVacancy(ctx, vacancyFlow.completed);
         }
         return;
       }
@@ -358,26 +499,127 @@ export class BotUpdate {
       }
     }
 
-    const parsed = parseProfileMessage(text);
-    if (!parsed.matched) return;
+    let groupMembership: Awaited<ReturnType<GroupsService['ensureMembership']>> | null = null;
+    if (this.isGroup(ctx)) {
+      groupMembership = await this.groups.ensureMembership(ctx.chat, ctx.from);
+      if (groupMembership.user.profile?.isActive) return;
+    }
+
+    const parsed =
+      this.isGroup(ctx) && !hasProfileRequiredKey(text)
+        ? { matched: false, errors: [] }
+        : parseProfileMessage(text);
+    if (!parsed.matched) {
+      if (!this.isGroup(ctx)) return;
+      const fallbackName = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ');
+      const inferred = parseFreeformProfileMessage(text, fallbackName);
+      if (!inferred) return;
+
+      const membership =
+        groupMembership ?? (await this.groups.ensureMembership(ctx.chat, ctx.from));
+      this.flows.saveIntroDraft(membership.id, ctx.from.id, inferred);
+      await ctx.reply(
+        [
+          'Xabaringizdan quyidagi profil taxmin qilindi.',
+          'Tekshirib, saqlashni tasdiqlang. Keyin /editprofile orqali tuzatishingiz mumkin.',
+          '',
+          this.profiles.formatInput(inferred),
+        ].join('\n'),
+        {
+          parse_mode: 'HTML',
+          ...Markup.inlineKeyboard([
+            Markup.button.callback('Ha, saqlash', `intro:y:${membership.id}`),
+            Markup.button.callback('Yo‘q, bekor qilish', `intro:n:${membership.id}`),
+          ]),
+        },
+      );
+      return;
+    }
     if (!parsed.data) {
       await ctx.reply(`Profil formati noto‘g‘ri:\n• ${parsed.errors.join('\n• ')}`);
       return;
     }
 
-    const user = await this.users.upsertTelegramUser(ctx.from);
-    const profile = await this.profiles.save(user.id, parsed.data);
     if (this.isGroup(ctx)) {
-      const membership = await this.groups.ensureMembership(ctx.chat, ctx.from);
+      const membership =
+        groupMembership ?? (await this.groups.ensureMembership(ctx.chat, ctx.from));
+      const profile = await this.profiles.save(membership.userId, parsed.data);
       await this.groups.setVisibility(membership.id, true);
-      await ctx.reply(`${telegramMention(user)}\n\n${this.profiles.format(profile)}`, {
+      await ctx.reply(`${telegramMention(membership.user)}\n\n${this.profiles.format(profile)}`, {
         parse_mode: 'HTML',
       });
     } else {
+      const user = await this.users.upsertTelegramUser(ctx.from);
+      const profile = await this.profiles.save(user.id, parsed.data);
       await ctx.reply(`Profil saqlandi.\n\n${this.profiles.format(profile)}`, {
         parse_mode: 'HTML',
       });
     }
+  }
+
+  private async startVacancySubmission(ctx: Context): Promise<void> {
+    if (!ctx.from || !this.isGroup(ctx)) {
+      await ctx.reply('Vacansiya faqat guruh ichida /vacancy orqali qo‘shiladi.');
+      return;
+    }
+
+    const membership = await this.groups.ensureMembership(ctx.chat, ctx.from);
+    const prompt = this.flows.startVacancy(
+      ctx.chat.id,
+      ctx.from.id,
+      membership.groupId,
+      membership.userId,
+    );
+    await ctx.reply(
+      [
+        'Vacansiyani standart forma bo‘yicha qo‘shamiz.',
+        'Yuborganingizdan keyin bot egasi tasdiqlasa, faqat shu guruh a’zolari bot lichkasida ko‘ra oladi.',
+        '',
+        prompt,
+        '',
+        'Jarayonni to‘xtatish uchun /cancel yuboring yoki 30 daqiqa kuting.',
+      ].join('\n'),
+    );
+  }
+
+  private async showVacancyGroups(ctx: Context): Promise<void> {
+    if (!ctx.from) return;
+    if (!this.isPrivate(ctx)) {
+      await ctx.reply('Vacansiyalarni bot bilan shaxsiy chatda /vacancies orqali ko‘ring.');
+      return;
+    }
+
+    const user = await this.users.upsertTelegramUser(ctx.from);
+    const dbMemberships = await this.vacancies.accessibleGroups(user.id);
+    const memberships: typeof dbMemberships = [];
+    for (const membership of dbMemberships) {
+      if (await this.hasLiveGroupMembership(ctx, membership.group.telegramId)) {
+        memberships.push(membership);
+      }
+    }
+    if (memberships.length === 0) {
+      await ctx.reply(
+        'Siz a’zo bo‘lgan faol guruh topilmadi. Guruh ichida bot bilan kamida bir marta interaction bo‘lishi kerak.',
+      );
+      return;
+    }
+
+    if (memberships.length === 1) {
+      await this.replyVacancyPage(ctx, user.id, memberships[0].groupId, 0, false);
+      return;
+    }
+
+    await ctx.reply(
+      'Qaysi guruh vacansiyalarini ko‘rmoqchisiz?',
+      Markup.inlineKeyboard(
+        memberships.map((membership) => [
+          Markup.button.callback(
+            `${this.buttonText(membership.group.title)} (${membership.group._count.vacancies})`,
+            `vacg:${membership.groupId}:0`,
+          ),
+        ]),
+      ),
+    );
   }
 
   private async completeEvent(
@@ -409,6 +651,103 @@ export class BotUpdate {
       this.logger.warn(`Event creation failed: ${String(error)}`);
       await ctx.reply(`${message}\n/event orqali qayta urinib ko‘ring.`);
     }
+  }
+
+  private async completeVacancy(
+    ctx: Context & { chat: GroupChat },
+    completed: {
+      groupId: string;
+      creatorId: string;
+      data: Parameters<VacanciesService['createPending']>[2];
+    },
+  ): Promise<void> {
+    try {
+      const vacancy = await this.vacancies.createPending(
+        completed.groupId,
+        completed.creatorId,
+        completed.data,
+      );
+      const ownerIds = this.vacancies.ownerTelegramIds();
+      if (ownerIds.length === 0) {
+        await ctx.reply(
+          'Vacansiya qabul qilindi, lekin tasdiqlovchi admin sozlanmagan. Bot egasiga xabar bering.',
+        );
+        return;
+      }
+
+      const approvalText = [
+        'Yangi vacansiya tasdiqlashga keldi.',
+        '',
+        this.vacancies.format(vacancy),
+      ].join('\n');
+      const notifications = await Promise.allSettled(
+        ownerIds.map((ownerId) =>
+          ctx.telegram.sendMessage(ownerId.toString(), approvalText, {
+            parse_mode: 'HTML',
+            link_preview_options: { is_disabled: true },
+            ...Markup.inlineKeyboard([
+              [
+                Markup.button.callback('Tasdiqlash', `vacapp:a:${vacancy.id}`),
+                Markup.button.callback('Rad etish', `vacapp:r:${vacancy.id}`),
+              ],
+            ]),
+          }),
+        ),
+      );
+      const failed = notifications.filter(
+        (notification) => notification.status === 'rejected',
+      ).length;
+      await ctx.reply(
+        failed === ownerIds.length
+          ? 'Vacansiya qabul qilindi, lekin tasdiqlovchi adminga xabar yuborib bo‘lmadi.'
+          : 'Vacansiya qabul qilindi. Tasdiqlangandan keyin shu guruh a’zolari uchun ko‘rinadi.',
+      );
+    } catch (error) {
+      const message =
+        error instanceof BadRequestException
+          ? error.message
+          : 'Vacansiyani yaratishda xatolik yuz berdi.';
+      this.logger.warn(`Vacancy creation failed: ${String(error)}`);
+      await ctx.reply(`${message}\n/vacancy orqali qayta urinib ko‘ring.`);
+    }
+  }
+
+  private async replyVacancyPage(
+    ctx: Context,
+    userId: string,
+    groupId: string,
+    page: number,
+    edit: boolean,
+  ): Promise<void> {
+    const membership = await this.vacancies.findAccessibleGroup(userId, groupId);
+    const canView =
+      membership && (await this.hasLiveGroupMembership(ctx, membership.group.telegramId));
+    if (!canView) {
+      const message = 'Bu guruh vacansiyalarini ko‘rish uchun guruh a’zosi bo‘lishingiz kerak.';
+      if (edit) {
+        await this.safeEditMessageText(ctx, message);
+      } else {
+        await ctx.reply(message);
+      }
+      return;
+    }
+
+    let result = await this.vacancies.listApproved(groupId, page);
+    if (result.total > 0 && result.page >= result.totalPages) {
+      result = await this.vacancies.listApproved(groupId, result.totalPages - 1);
+    }
+
+    const text = this.vacancies.formatPage(membership.group.title, result);
+    const extra = {
+      parse_mode: 'HTML' as const,
+      link_preview_options: { is_disabled: true },
+      ...this.vacancyPageKeyboard(groupId, result.page, result.totalPages),
+    };
+    if (edit) {
+      await this.safeEditMessageText(ctx, text, extra);
+      return;
+    }
+    await ctx.reply(text, extra);
   }
 
   private async replySearchResult(
@@ -444,6 +783,51 @@ export class BotUpdate {
         Markup.button.callback('Chiqish', `event:l:${eventId}`),
       ]),
     };
+  }
+
+  private vacancyPageKeyboard(groupId: string, page: number, totalPages: number) {
+    const nav = [];
+    if (page > 0) {
+      nav.push(Markup.button.callback('◀️', `vacg:${groupId}:${page - 1}`));
+    }
+    if (page + 1 < totalPages) {
+      nav.push(Markup.button.callback('▶️', `vacg:${groupId}:${page + 1}`));
+    }
+    return nav.length ? Markup.inlineKeyboard([nav]) : {};
+  }
+
+  private buttonText(value: string): string {
+    return value.length > 36 ? `${value.slice(0, 35)}…` : value;
+  }
+
+  private async hasLiveGroupMembership(ctx: Context, groupTelegramId: bigint): Promise<boolean> {
+    if (!ctx.from) return false;
+    try {
+      const member = await ctx.telegram.getChatMember(groupTelegramId.toString(), ctx.from.id);
+      if (member.status === 'left' || member.status === 'kicked') {
+        await this.groups.leave(Number(groupTelegramId), ctx.from.id);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      this.logger.warn(`Could not verify live group membership: ${String(error)}`);
+      return false;
+    }
+  }
+
+  private async safeEditMessageText(
+    ctx: Context,
+    text: string,
+    extra: Parameters<Context['editMessageText']>[1] = {
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+    },
+  ): Promise<void> {
+    try {
+      await ctx.editMessageText(text, extra);
+    } catch (error) {
+      if (!String(error).includes('message is not modified')) throw error;
+    }
   }
 
   private isPrivate(ctx: Context): ctx is Context & { chat: Chat.PrivateChat } {

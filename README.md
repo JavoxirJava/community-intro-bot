@@ -21,6 +21,7 @@ cp .env.example .env
 | Variable | Description |
 | --- | --- |
 | `BOT_TOKEN` | Telegram bot token from BotFather |
+| `BOT_OWNER_IDS` | Comma-separated Telegram user IDs allowed to approve or reject vacancies |
 | `DATABASE_URL` | PostgreSQL connection URL |
 | `APP_TIMEZONE` | Application timezone; defaults to `Asia/Tashkent` |
 | `POSTGRES_PORT` | Dedicated localhost PostgreSQL port; defaults to `55432` |
@@ -70,11 +71,15 @@ Add the bot to each group and grant it permission to read and send messages. Eve
 creation still checks the invoking user's live status with `getChatMember`; only
 administrators and the group creator can use `/event`.
 
+Vacancies use owner moderation. Set `BOT_OWNER_IDS` to your Telegram numeric user
+ID before accepting vacancy submissions. If multiple people can moderate, separate
+IDs with commas, for example `123456789,987654321`.
+
 By default, BotFather privacy mode prevents bots from receiving ordinary group
 messages. Disable it using `/setprivacy` in BotFather if standardized introductions
-such as `Ism: ...` and `Soha: ...` must be parsed directly from normal group
-messages. Commands, service messages, replies to the bot, and callback buttons have
-different Telegram delivery rules.
+such as `Ism: ...` and `Soha: ...`, or group-based event/vacancy form answers,
+must be parsed directly from normal group messages. Commands, service messages,
+replies to the bot, and callback buttons have different Telegram delivery rules.
 
 ## Profile format
 
@@ -93,6 +98,28 @@ Description: Backend va networkingga qiziqaman.
 The same format works in private chat and groups. Posting it in a group explicitly
 makes that global profile visible in that group only. Creating or editing a profile
 in private chat does not automatically expose it in any group.
+
+## Vacancies
+
+- `/vacancy` or `/vakansiya` starts a standardized vacancy form in the group.
+- Any active group member can submit a vacancy, but it is stored as pending first.
+- Bot owners from `BOT_OWNER_IDS` receive approve/reject buttons in private chat.
+- `/vacancies` or `/vakansiyalar` works in private chat and shows only vacancies
+  from groups where the requester has an active membership.
+- Approved vacancies are paginated 5 per page.
+
+Vacancy fields stored in the database:
+
+```text
+Lavozim
+Kompaniya
+Ish formati
+Joylashuv
+Maosh (optional)
+Talablar
+Aloqa
+Tavsif (optional)
+```
 
 ## Privacy and lifecycle behavior
 
@@ -113,8 +140,8 @@ in private chat does not automatically expose it in any group.
 
 - Conversation state is in process memory. Use Redis-backed state before running
   multiple bot replicas or requiring wizard recovery after restarts.
-- Long polling permits one bot replica. Add a secured webhook transport for
-  horizontally scaled production deployment.
+- VPS production uses a secured webhook:
+  `https://flip-card-app.javohir-dev.uz/community-intro/webhook`.
 - Add rate limiting, structured telemetry, alerting, backup/restore procedures,
   and broader integration tests against a disposable PostgreSQL database.
 - Add event cancellation/completion commands and periodic completion of past
